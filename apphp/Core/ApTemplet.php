@@ -49,7 +49,7 @@ class ApTemplet
             return true;
         }
 
-        return filemtime($templet_file) >= filemtime($templet_file);
+        return filemtime($path) > filemtime($templet_file);
     }
 
     /**
@@ -68,52 +68,66 @@ class ApTemplet
      * @param array $params 参数
      * @return bool
      * */
-    public function show($view, $params = [])
+    public function show($view, $params = []): string
     {
-        $file = $this->template_dir . $this->analyzeDot($view) . '.html';
-
-        // 将参数引入
-        if(is_array($params))
-        {
-            extract($params);
+        if (!is_string($view) || !preg_match('/\A[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\z/', $view)) {
+            throw new \InvalidArgumentException('Invalid view name');
         }
-
-        // 判断是否有改动 无改动则使用缓存
-        if(!$this->isExpired($file))
-        {
-            $cache_file = $this->getCompiledPath($file);
-
-            require_once $cache_file;
-
-            return true;
+        if ($params === null) { $params = []; }
+        if (!is_array($params)) { throw new \InvalidArgumentException('View data must be an array'); }
+        $file = realpath($this->template_dir . $this->analyzeDot($view) . '.html');
+        $directory = realpath($this->template_dir);
+        if ($file === false || $directory === false || strpos($file, $directory . DIRECTORY_SEPARATOR) !== 0 || !is_file($file)) {
+            throw new \RuntimeException('View not found: ' . $view);
         }
-
-        $file_content = file_get_contents($file);
-        $result = '';
-        foreach(token_get_all($file_content) as $token)
-        {
-            if(is_array($token))
-            {
-                list($id, $content) = $token;
-                if($id == T_INLINE_HTML)
-                {
-                    foreach ($this->compilers as $type)
-                    {
-                        $content = $this->{"compile{$type}"}($content);
-                    }
-                }
-                $result .= $content ;
-            }
-            else
-            {
-                $result .= $token;
-            }
+        if (!is_dir($this->cache_dir) && !mkdir($this->cache_dir, 0700, true) && !is_dir($this->cache_dir)) {
+            throw new \RuntimeException('Cannot create template cache directory');
         }
+        clearstatcache(true, $file);
         $cache_file = $this->getCompiledPath($file);
-        file_put_contents($cache_file,$result);
-        require $cache_file;
+        clearstatcache(true, $cache_file);
+        if ($this->isExpired($file)) {
+            $file_content = file_get_contents($file);
+            if ($file_content === false) { throw new \RuntimeException('Cannot read view: ' . $view); }
+            $result = '';
+            foreach (token_get_all($file_content) as $token) {
+                if (is_array($token)) {
+                    list($id, $content) = $token;
+                    if ($id == T_INLINE_HTML) {
+                        foreach ($this->compilers as $type) { $content = $this->{'compile' . $type}($content); }
+                    }
+                    $result .= $content;
+                } else { $result .= $token; }
+            }
+            // Write completely before publishing, so readers never include partial PHP.
+            $temporary = tempnam($this->cache_dir, 'view-');
+            if ($temporary === false) { throw new \RuntimeException('Cannot create template cache'); }
+            try {
+                if (file_put_contents($temporary, $result) === false || !rename($temporary, $cache_file)) {
+                    throw new \RuntimeException('Cannot save template cache');
+                }
+                if (function_exists('opcache_invalidate')) { opcache_invalidate($cache_file, true); }
+            } finally { if (is_file($temporary)) { unlink($temporary); } }
+        }
+        return $this->renderCompiled($cache_file, $params);
+    }
 
-        return true;
+    private function renderCompiled($template_file, array $template_data): string
+    {
+        // Static scope keeps template variables separate from compiler state and $this.
+        $render = static function($template_file, array $template_data) {
+            extract($template_data, EXTR_SKIP);
+            require $template_file;
+        };
+        $level = ob_get_level();
+        ob_start();
+        try {
+            $render($template_file, $template_data);
+            return ob_get_clean();
+        } catch (\Throwable $error) {
+            while (ob_get_level() > $level) { ob_end_clean(); }
+            throw $error;
+        }
     }
 
     /**

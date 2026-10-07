@@ -15,7 +15,7 @@
          * 直接填写类名即可
          * */
         'global_middleware' => [
-            //\app\Auth\Middleware\CheckCsrf::class
+            \app\Auth\Middleware\CheckCsrf::class
         ],
 
 

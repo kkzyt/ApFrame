@@ -90,31 +90,37 @@ function readSet($key, $default = 'undefined')
 
 function one_to_one($to_table, $fk_id, $value)
 {
-    $mysqli = new mysqli(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE);
-    $query = $mysqli->query("SELECT * FROM ${to_table} WHERE ${fk_id} = ${value}");
-
-    $assoc = $query->fetch_assoc();
-
-    return $assoc;
+    $db = new \apphp\Core\database\MySql();
+    try {
+        $rows = $db->selectSpecificField('*', $to_table, ['column' => $fk_id, 'value' => $value], 1);
+        return $rows[0] ?? null;
+    } finally { $db->close(); }
 }
 
 function one_to_many($to_table, $fk_id, $value)
 {
-    $mysqli = new mysqli(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE);
-    $query = $mysqli->query("SELECT * FROM ${to_table} WHERE ${fk_id} = ${value}");
-
-    $assoc = $query->fetch_all(MYSQLI_ASSOC);
-
-    return $assoc;
+    $db = new \apphp\Core\database\MySql();
+    try { return $db->selectSpecificField('*', $to_table, ['column' => $fk_id, 'value' => $value]); }
+    finally { $db->close(); }
 }
 
 function many_to_many($pk_id, $and_table, $to_table, $fk_id, $value)
 {
     $mysqli = new mysqli(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE);
-    $query = $mysqli->query("SELECT * FROM ${and_table} WHERE ${pk_id} = ${value} INNER JOIN ${to_table} ON ${and_table}.${fk_id} = ${to_table}.${fk_id}");
+    foreach ([$pk_id, $and_table, $to_table, $fk_id] as $identifier) {
+        if (!is_string($identifier) || !preg_match('/\A[A-Za-z_][A-Za-z0-9_]*\z/', $identifier)) {
+            throw new \InvalidArgumentException('Invalid SQL identifier');
+        }
+    }
+    $statement = $mysqli->prepare("SELECT * FROM `${and_table}` INNER JOIN `${to_table}` ON `${and_table}`.`${fk_id}` = `${to_table}`.`${fk_id}` WHERE `${and_table}`.`${pk_id}` = ?");
+    $statement->bind_param('s', $value);
+    $statement->execute();
+    $query = $statement->get_result();
 
     $assoc = $query->fetch_all(MYSQLI_ASSOC);
 
+    $statement->close();
+    $mysqli->close();
     return $assoc;
 }
 

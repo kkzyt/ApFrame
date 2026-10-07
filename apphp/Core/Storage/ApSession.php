@@ -1,155 +1,124 @@
 <?php
-/**
- * Created by PhpStorm.
- * User: APOCALYPSE
- * Date: 3/8/2018
- * Time: 21:00
- */
-
 namespace apphp\Core\Storage;
-
 
 class ApSession
 {
-
-    /**
-     * @access protected $driver 驱动
-     * */
     protected $driver;
-    /**
-     * @access protected static $info 用户数据
-     * */
-    protected static $info;
+    protected static $info = [];
+    private static $session_id;
 
     function __construct()
     {
-        $driver = strtolower(SESSION_DRIVER);
-        $this->driver = $driver;
-        if($this->generated()){
-            $this->init();
+        $this->driver = strtolower(SESSION_DRIVER);
+        if (!USE_SESSION || self::$session_id !== null) { return; }
+        $id = $_COOKIE['apframe_session'] ?? null;
+        $valid = is_string($id) && preg_match('/\A(?:[a-f0-9]{32}|[a-f0-9]{64})\z/', $id);
+        $data = $valid ? $this->read($id) : null;
+        if (!is_string($data)) {
+            $id = bin2hex(random_bytes(32));
+            $data = serialize([]);
+            $this->write($id, $data);
         }
+        self::$session_id = $id;
+        // Make the ID available during the request that creates the cookie.
+        $_COOKIE['apframe_session'] = $id;
+        $info = @unserialize($data, ['allowed_classes' => false]);
+        self::$info = is_array($info) ? $info : [];
+        setcookie('apframe_session', $id, [
+            'expires' => time() + 7200, 'path' => '/', 'httponly' => true,
+            'secure' => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off', 'samesite' => 'Lax',
+        ]);
     }
 
-    /**
-     * @access public 开启Session
-     * */
-    public static function start()
+    public static function start() { return new static(); }
+
+    private function filePath($id)
     {
-        $instance = new static();
-        $instance->generated();
+        if (!is_string($id) || !preg_match('/\A(?:[a-f0-9]{32}|[a-f0-9]{64})\z/', $id)) {
+            throw new \InvalidArgumentException('Invalid session ID');
+        }
+        $directory = ROOT_PATH . 'runtime/session';
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            throw new \RuntimeException('Cannot create session directory');
+        }
+        $directory = realpath($directory);
+        $path = $directory . DIRECTORY_SEPARATOR . $id;
+        if (is_link($path) || (file_exists($path) && dirname(realpath($path)) !== $directory)) {
+            throw new \RuntimeException('Unsafe session file');
+        }
+        return $path;
     }
 
-    /**
-     * @access protected cookie生成session,若存在则延长他的时间
-     * @return bool
-     * */
-    protected function generated()
+    private function redis()
     {
-        if(!isset($_COOKIE['apframe_session'])){
-            $session_id = md5(uniqid(microtime(true), true));
-            setcookie('apframe_session', $session_id, time() + 7200);
-            switch ($this->driver){
-                case 'file':
-                    file_put_contents(ROOT_PATH . 'runtime/session/' . $session_id, '');
-                    break;
-                case 'redis':
-                    $redis = new \Redis();
-                    $redis->set($session_id, '');
-                    $redis->close();
-                    break;
-                case 'mysql':
-                    $mysql = new \mysqli(MYSQL_HOST,MYSQL_USER,MYSQL_PASSWORD,MYSQL_DATABASE,MYSQL_PORT);
-                    $sql = "INSERT INTO `session`(`key`,`value`) VALUES('${session_id}', '') ";
-                    $mysql->query($sql);
-                    $mysql->close();
-                    break;
-            }
-            return false;
-        }
-        else{
-            setcookie('apframe_session', $_COOKIE['apframe_session'],  time() + 7200);
-            return true;
-        }
+        $redis = new \Redis();
+        $redis->connect(REDIS_HOST, REDIS_PORT);
+        return $redis;
     }
 
-    /**
-     * @access protected 将数据读入静态变量
-     * */
-    protected function init()
+    private function mysql()
     {
-        switch ($this->driver){
+        $mysql = new \mysqli(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_PORT);
+        $mysql->set_charset(MYSQL_CHARSET);
+        return $mysql;
+    }
+
+    private function read($id)
+    {
+        switch ($this->driver) {
             case 'file':
-                        $file_name = ROOT_PATH . '/runtime/session/' . $_COOKIE['apframe_session'];
-                        $data = file_get_contents($file_name);
-                        self::$info = unserialize($data);
-                        break;
+                $path = $this->filePath($id);
+                return is_file($path) ? file_get_contents($path) : null;
             case 'redis':
-                        $redis = new \Redis();
-                        $redis->connect(REDIS_HOST, REDIS_PORT);
-                        $info = $redis->get($_COOKIE['apframe_session']);
-                        self::$info = unserialize($info);
-                        $redis->close();
-                        break;
+                $redis = $this->redis();
+                $data = $redis->get($id);
+                if ($data !== false) { $redis->expire($id, 7200); }
+                $redis->close();
+                return $data;
             case 'mysql':
-                        $mysql = new \mysqli(MYSQL_HOST,MYSQL_USER,MYSQL_PASSWORD,MYSQL_DATABASE,MYSQL_PORT);
-                        $sql = "SELECT * FROM `session` WHERE `key`='${_COOKIE['apframe_session']}'";
-                        $query = $mysql->query($sql);
-                        $info = mysqli_fetch_assoc($query)['value'];
-                        self::$info = unserialize($info);
-                        $mysql->close();
-                        break;
+                $mysql = $this->mysql();
+                $stmt = $mysql->prepare('SELECT `value` FROM `session` WHERE `key` = ?');
+                $stmt->bind_param('s', $id);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close(); $mysql->close();
+                return $row['value'] ?? null;
+            default: throw new \InvalidArgumentException('Unsupported session driver');
         }
     }
 
-    /**
-     * @access public 设置session
-     * @param $key string 键名
-     * @param $data mixed 数据
-     * */
-    public function set($key , $data)
+    private function write($id, $data)
     {
-        // 万一是对象
-        if(is_object($data)){
-            $data = serialize($data);
-        }
-        self::$info[$key] = $data;
-        switch ($this->driver){
+        switch ($this->driver) {
             case 'file':
-                        $serialize_data = serialize(self::$info);
-                        file_put_contents(ROOT_PATH . '/runtime/session/' . $_COOKIE['apframe_session'], $serialize_data);
-                        break;
+                if (file_put_contents($this->filePath($id), $data, LOCK_EX) === false) {
+                    throw new \RuntimeException('Cannot save session');
+                }
+                break;
             case 'redis':
-                        $serialize_data = serialize(self::$info);
-                        $redis = new \Redis();
-                        $redis->connect(REDIS_HOST, REDIS_PORT);
-                        $redis->set($_COOKIE['apframe_session'], $serialize_data);
-                        $redis->close();
-                        break;
+                $redis = $this->redis();
+                if (!$redis->setex($id, 7200, $data)) { throw new \RuntimeException('Cannot save session'); }
+                $redis->close(); break;
             case 'mysql':
-                        $serialize_data = serialize(self::$info);
-                        $mysql = new \mysqli(MYSQL_HOST,MYSQL_USER,MYSQL_PASSWORD,MYSQL_DATABASE,MYSQL_PORT);
-                        $sql = "INSERT INTO `session`(`key`,`value`) VALUES('${_COOKIE['apframe_session']}', '${serialize_data}') ";
-                        $mysql->query($sql);
-                        $mysql->close();
-                        break;
-
+                $mysql = $this->mysql();
+                $stmt = $mysql->prepare('INSERT INTO `session` (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)');
+                $stmt->bind_param('ss', $id, $data);
+                if (!$stmt->execute()) { throw new \RuntimeException('Cannot save session'); }
+                $stmt->close(); $mysql->close(); break;
+            default: throw new \InvalidArgumentException('Unsupported session driver');
         }
     }
 
-    /**
-     * @access public 获取session
-     * @param string $key 键值
-     * @return mixed 返回数据
-     * */
-    public function get($key)
+    public function set($key, $data, $scope = null)
     {
-        $info = self::$info[$key];
+        if (!USE_SESSION) { throw new \LogicException('Sessions are disabled'); }
+        if ($scope === null) { self::$info[$key] = $data; }
+        else { self::$info[$scope][$key] = $data; }
+        $this->write(self::$session_id, serialize(self::$info));
+    }
 
-        // 万一是对象
-        if(preg_match('/O:\d+:"\S+":\d+:\{/', $info)){
-            $info = unserialize($info);
-        }
-
-        return $info;
+    public function get($key, $scope = null)
+    {
+        return $scope === null ? (self::$info[$key] ?? null) : (self::$info[$scope][$key] ?? null);
     }
 }

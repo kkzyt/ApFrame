@@ -1,63 +1,29 @@
 <?php
-/**
- * Created by PhpStorm.
- * User: APOCALYPSE
- * Date: 2017/9/26
- * Time: 10:37
- */
-
 namespace apphp\Core;
-
 
 abstract class Controller
 {
-    protected static $instance;
+    protected static $instances = [];
     protected $ApTemplet;
 
-    /**
-     * 该方法初始化控制器要用的工具
-     * */
-    function __construct()
+    function __construct() { $this->ApTemplet = new ApTemplet(); }
+
+    public static function instance(): Controller
     {
-        $this->ApTemplet = new ApTemplet();
+        $class = static::class;
+        if (!isset(self::$instances[$class])) { self::$instances[$class] = new static(); }
+        return self::$instances[$class];
     }
 
-    /**
-     * 将控制器实例化并返回
-     * @return Controller
-     * */
-    public static function instance() : Controller
+    protected function view($view_name, array $data = []): string
     {
-        if(empty(self::$instance))
-        {
-            self::$instance = new static();
-
-            return self::$instance;
-        }
-        return self::$instance;
+        // Child constructors do not have to initialize the template engine.
+        if ($this->ApTemplet === null) { $this->ApTemplet = new ApTemplet(); }
+        return $this->ApTemplet->show($view_name, $data);
     }
 
-    /**
-     *  @method protected 渲染模板
-     *
-     *  @param string $view_name 模板名称
-     *  @param array $data 数据
-     *
-     * @return string 返回渲染好的 HTML 模板
-     * */
-    protected function view($view_name, array $data = null)
+    protected function redirect($url, $status = 302)
     {
-        return $this->ApTemplet->show($view_name,$data);
-    }
-
-    /**
-     * @method protected 重定向
-     *
-     * @param string $url 指定路径
-     *
-     * */
-    protected function redirect($url)
-    {
-        header("Location:{$url}");
+        throw new \apphp\Core\Response\Redirect($url, $status);
     }
 }
